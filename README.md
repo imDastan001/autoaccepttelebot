@@ -1,0 +1,1 @@
+# Auto accept the join request
