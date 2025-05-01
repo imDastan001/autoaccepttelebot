@@ -4,24 +4,31 @@ import asyncio
 import os
 from mongo import User_collection
 from dotenv import load_dotenv
+from telegram.ext import CommandHandler
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
 # CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-
+ALLOWED_CHAT_IDS = [int(os.getenv("CHANNEL_ID"))]
 # In-memory pending request queue
 pending_requests = []
 pending_lock = asyncio.Lock()
 
 CHECK_INTERVAL = 30  # in seconds
 
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Hello! I'm a bot that handles join requests.")
 # --- HANDLER FOR JOIN REQUEST ---
 async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.chat_join_request.from_user.id
     chat_id = update.chat_join_request.chat.id
     user_name = update.chat_join_request.from_user.full_name
+    if chat_id not in ALLOWED_CHAT_IDS:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Join request from unknown chat {chat_id} was ignored.")
+        return
     try:
         if User_collection.find_one({'user_id': str(user_id)}):  # Convert to string
             await update.chat_join_request.approve()
@@ -117,7 +124,7 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
-
+    application.add_handler(CommandHandler("start", start))
     job_queue = application.job_queue
     job_queue.run_repeating(check_pending_requests, interval=CHECK_INTERVAL, first=10)
 
