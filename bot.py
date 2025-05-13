@@ -97,6 +97,7 @@ async def check_pending_requests(context: ContextTypes.DEFAULT_TYPE):
 # --- APPROVE ---
 async def process_approval(context: ContextTypes.DEFAULT_TYPE, req):
     try:
+        await asyncio.sleep(10)
         await context.bot.approve_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
         await notify_admin(context, user_id=req['user_id'], user_name=req['user_name'])
     except Exception as e:
@@ -105,6 +106,7 @@ async def process_approval(context: ContextTypes.DEFAULT_TYPE, req):
 # --- DISMISS ---
 async def process_dismissal(context: ContextTypes.DEFAULT_TYPE, req):
     try:
+        
         await context.bot.decline_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
     except Exception as e:
         print(f"Dismissal Error: {e}")
