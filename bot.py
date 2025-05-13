@@ -30,7 +30,8 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Join request from unknown chat {chat_id} was ignored.")
         return
     try:
-        if User_collection.find_one({'user_id': str(user_id)}):  # Convert to string
+        if User_collection.find_one({'user_id': str(user_id)}):
+            await asyncio.sleep(10)# Convert to string
             await update.chat_join_request.approve()
             await notify_admin(context, user_id=user_id, user_name=user_name)
             return
