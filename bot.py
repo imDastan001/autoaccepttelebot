@@ -1,137 +1,326 @@
-from telegram.ext import Application, ChatJoinRequestHandler, ContextTypes
-from telegram import Update
-import asyncio
 import os
+import asyncio
+import logging
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, ChatJoinRequestHandler, CommandHandler,
+    CallbackQueryHandler, ContextTypes
+)
+from telegram.request import HTTPXRequest
+
 from mongo import User_collection
-from dotenv import load_dotenv
-from telegram.ext import CommandHandler
 
-load_dotenv()
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# ── Environment variables ─────────────────────────────────────────────────────
+TOKEN         = os.getenv("AUTO_ACCEPT_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
-# CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-ALLOWED_CHAT_IDS = [int(os.getenv("CHANNEL_ID"))]
-# In-memory pending request queue
-pending_requests = []
-pending_lock = asyncio.Lock()
 
-CHECK_INTERVAL = 30  # in seconds
+# ── Bot mode — default is manual on startup ───────────────────────────────────
+# "manual" or "auto"
+current_mode = "manual"
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DB CHECK
+# ═════════════════════════════════════════════════════════════════════════════
+
+def is_user_in_db(user_id: str) -> tuple[bool, str]:
+    """
+    Returns (found, status)
+    found: True if user exists in DB
+    status: "found" | "not_found" | "db_error"
+    """
+    try:
+        user = User_collection.find_one({"user_id": user_id})
+        if user:
+            return True, "found"
+        return False, "not_found"
+    except Exception as e:
+        logger.error(f"MongoDB error for user {user_id}: {e}")
+        return False, "db_error"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# /start
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Hello! I'm a bot that handles join requests.")
-# --- HANDLER FOR JOIN REQUEST ---
-async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.chat_join_request.from_user.id
-    chat_id = update.chat_join_request.chat.id
-    user_name = update.chat_join_request.from_user.full_name
-    if chat_id not in ALLOWED_CHAT_IDS:
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"❌ Join request from unknown chat {chat_id} was ignored.")
-        return
-    try:
-        if User_collection.find_one({'user_id': str(user_id)}):
-            await asyncio.sleep(10)# Convert to string
-            await update.chat_join_request.approve()
-            await notify_admin(context, user_id=user_id, user_name=user_name)
-            return
-    except Exception as e:
-        await context.bot.send_message(ADMIN_CHAT_ID, f"Error while handling join request for user {user_id}: {e}")
-    
-    async with pending_lock:
-        if not any(p['user_id'] == user_id and p['chat_id'] == chat_id for p in pending_requests):
-            pending_requests.append({
-                'user_id': user_id,
-                'chat_id': chat_id,
-                'user_name': user_name,
-                'check_count': 0
-            })
-
-# --- PERIODIC CHECK ---
-async def check_pending_requests(context: ContextTypes.DEFAULT_TYPE):
-    global pending_requests
-
-    async with pending_lock:
-        current_batch = pending_requests.copy()
-        pending_requests = []
-
-    if not current_batch:
+    if update.effective_user.id != ADMIN_CHAT_ID:
         return
 
-    user_ids = [str(req['user_id']) for req in current_batch]  # Convert all to string
-    allowed_users = []
-    try:
-        allowed_users = User_collection.find({'user_id': {'$in': user_ids}})
-    except Exception as e:
-        await context.bot.send_message(ADMIN_CHAT_ID, f"Error while fetching allowed users: {e}")
+    mode_label = "🟢 Auto" if current_mode == "auto" else "🔴 Manual"
 
-    
-    
-    allowed_ids = [user['user_id'] for user in allowed_users]
-
-    to_approve = []
-    to_dismiss = []
-    to_retry = []
-
-    for req in current_batch:
-        if str(req['user_id']) in allowed_ids:  # Compare as string
-            to_approve.append(req)
-        else:
-            req['check_count'] += 1
-            if req['check_count'] >= 3:
-                to_dismiss.append(req)
-
-            else:
-                to_retry.append(req)
-
-
-    for req in to_approve:
-        await process_approval(context, req)
-
-    for req in to_dismiss:
-        await process_dismissal(context, req)
-
-    async with pending_lock:
-        pending_requests.extend(to_retry)
-
-# --- APPROVE ---
-async def process_approval(context: ContextTypes.DEFAULT_TYPE, req):
-    try:
-        await asyncio.sleep(10)
-        await context.bot.approve_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
-        await notify_admin(context, user_id=req['user_id'], user_name=req['user_name'])
-    except Exception as e:
-        print(f"Approval Error: {e}")
-
-# --- DISMISS ---
-async def process_dismissal(context: ContextTypes.DEFAULT_TYPE, req):
-    try:
-        
-        await context.bot.decline_chat_join_request(chat_id=req['chat_id'], user_id=req['user_id'])
-    except Exception as e:
-        print(f"Dismissal Error: {e}")
-
-# --- NOTIFY ADMIN ---
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int, user_name: str = "Unknown"):
-    safe_name = user_name if user_name else "Unknown"
-    message = (
-        "<b>✅ Request Approved</b>\n"
-        f"<b>Name:</b> {safe_name}\n"
-        f"<b>ID:</b> <code>{user_id}</code>"
+    await update.message.reply_text(
+        f"🤖 <b>Auto Accept Bot</b>\n\n"
+        f"Current Mode: <b>{mode_label}</b>\n\n"
+        f"Tap /auto to switch to auto mode\n"
+        f"Tap /manual to switch to manual mode",
+        parse_mode="HTML"
     )
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="HTML")
 
 
-# --- MAIN ---
+# ═════════════════════════════════════════════════════════════════════════════
+# /manual
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def set_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    global current_mode
+
+    if current_mode == "manual":
+        await update.message.reply_text("⚠️ Already in manual mode!")
+        return
+
+    current_mode = "manual"
+    await update.message.reply_text(
+        "🔴 <b>Switched to Manual mode!</b>\n\n"
+        "All join requests will be sent to you for approval.",
+        parse_mode="HTML"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# /auto
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def set_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        return
+
+    global current_mode
+
+    if current_mode == "auto":
+        await update.message.reply_text("⚠️ Already in auto mode!")
+        return
+
+    current_mode = "auto"
+    await update.message.reply_text(
+        "🟢 <b>Switched to Auto mode!</b>\n\n"
+        "Bot will automatically accept/decline based on DB.",
+        parse_mode="HTML"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# JOIN REQUEST HANDLER
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    join_request = update.chat_join_request
+    user         = join_request.from_user
+    user_id      = str(user.id)
+    chat_id      = join_request.chat.id
+    username     = f"@{user.username}" if user.username else "(@none)"
+    first_name   = user.first_name or "Unknown"
+
+    logger.info(f"Join request from {first_name} ({user_id}) — mode: {current_mode}")
+
+    if current_mode == "manual":
+        await _handle_manual(context, user_id, username, first_name, chat_id)
+    else:
+        asyncio.create_task(
+            _handle_auto(context, user_id, username, first_name, chat_id)
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MANUAL MODE HANDLER
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_manual(context, user_id, username, first_name, chat_id):
+    """Send admin a notification with Accept/Decline buttons."""
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "✅ Accept",
+            callback_data=f"accept_{chat_id}_{user_id}"
+        ),
+        InlineKeyboardButton(
+            "❌ Decline",
+            callback_data=f"decline_{chat_id}_{user_id}"
+        )
+    ]])
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=(
+            f"📥 <b>New Join Request!</b>\n\n"
+            f"👤 Name: {first_name}\n"
+            f"🔗 Username: {username}\n"
+            f"🆔 User ID: <code>{user_id}</code>\n\n"
+            f"Tap below to accept or decline:"
+        ),
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTO MODE HANDLER
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _handle_auto(context, user_id, username, first_name, chat_id):
+    """Sleep 10 seconds then check DB and accept/decline."""
+    await asyncio.sleep(10)
+
+    found, status = is_user_in_db(user_id)
+
+    if status == "db_error":
+        # Ignore + notify admin
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    f"🚨 <b>MongoDB Error!</b>\n\n"
+                    f"Could not process join request.\n\n"
+                    f"👤 Name: {first_name}\n"
+                    f"🔗 Username: {username}\n"
+                    f"🆔 User ID: <code>{user_id}</code>\n\n"
+                    f"Please handle manually in the channel lobby."
+                ),
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify admin about DB error: {e}")
+        return
+
+    if found:
+        # Accept
+        try:
+            await context.bot.approve_chat_join_request(
+                chat_id=chat_id,
+                user_id=int(user_id)
+            )
+            logger.info(f"Auto accepted: {first_name} ({user_id})")
+        except Exception as e:
+            # User may have cancelled request already — ignore silently
+            logger.info(f"Could not accept {user_id} — may have cancelled: {e}")
+    else:
+        # Decline
+        try:
+            await context.bot.decline_chat_join_request(
+                chat_id=chat_id,
+                user_id=int(user_id)
+            )
+            logger.info(f"Auto declined: {first_name} ({user_id})")
+        except Exception as e:
+            # User may have cancelled request already — ignore silently
+            logger.info(f"Could not decline {user_id} — may have cancelled: {e}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUTTON CALLBACK — manual mode accept/decline
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    data   = query.data
+
+    if update.effective_user.id != ADMIN_CHAT_ID:
+        await query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    await query.answer()
+
+    parts   = data.split("_")
+    action  = parts[0]           # "accept" or "decline"
+    chat_id = int(parts[1])
+    user_id = int(parts[2])
+
+    if action == "accept":
+        try:
+            await context.bot.approve_chat_join_request(
+                chat_id=chat_id,
+                user_id=user_id
+            )
+            await query.edit_message_text(
+                query.message.text + "\n\n✅ <b>Accepted!</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            # Request no longer in lobby — user cancelled
+            await query.edit_message_text(
+                query.message.text + "\n\n⚠️ <b>Could not accept — request no longer pending.</b>",
+                parse_mode="HTML"
+            )
+
+    elif action == "decline":
+        try:
+            await context.bot.decline_chat_join_request(
+                chat_id=chat_id,
+                user_id=user_id
+            )
+            await query.edit_message_text(
+                query.message.text + "\n\n❌ <b>Declined!</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            # Request no longer in lobby — user cancelled
+            await query.edit_message_text(
+                query.message.text + "\n\n⚠️ <b>Could not decline — request no longer pending.</b>",
+                parse_mode="HTML"
+            )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BOT STARTUP
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def post_init(application: Application):
+    try:
+        await application.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                "🤖 <b>Auto Accept Bot Started!</b>\n\n"
+                "Current Mode: 🔴 <b>Manual</b>\n\n"
+                "Tap /auto to switch to auto mode\n"
+                "Tap /manual to switch to manual mode"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"Could not send startup message: {e}")
+
+
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    if not TOKEN:
+        logger.error("AUTO_ACCEPT_BOT_TOKEN is not set!")
+        return
 
-    application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
-    application.add_handler(CommandHandler("start", start))
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_pending_requests, interval=CHECK_INTERVAL, first=10)
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+    )
 
-    application.run_polling()
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .request(request)
+        .post_init(post_init)
+        .build()
+    )
 
-if __name__ == '__main__':
+    application.add_handler(CommandHandler("start",  start))
+    application.add_handler(CommandHandler("manual", set_manual))
+    application.add_handler(CommandHandler("auto",   set_auto))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(ChatJoinRequestHandler(handle_join_request))
+
+    logger.info("Auto Accept Bot is running...")
+    application.run_polling(
+        allowed_updates=["chat_join_request", "message", "callback_query"]
+    )
+
+
+if __name__ == "__main__":
     main()
