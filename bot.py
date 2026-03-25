@@ -8,6 +8,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes
 )
 from telegram.request import HTTPXRequest
+from telegram.error import RetryAfter
 
 from mongo import User_collection
 
@@ -169,13 +170,15 @@ async def _handle_manual(context, user_id, username, first_name, chat_id):
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def _handle_auto(context, user_id, username, first_name, chat_id):
-    """Sleep 10 seconds then check DB and accept/decline."""
-    await asyncio.sleep(10)
+    """Staggered sleep then check DB and accept/decline."""
+
+    # Stagger: spread users over 0–18 extra seconds to avoid flood
+    stagger = (int(user_id) % 10) * 2
+    await asyncio.sleep(10 + stagger)
 
     found, status = is_user_in_db(user_id)
 
     if status == "db_error":
-        # Ignore + notify admin
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
@@ -201,9 +204,55 @@ async def _handle_auto(context, user_id, username, first_name, chat_id):
                 user_id=int(user_id)
             )
             logger.info(f"Auto accepted: {first_name} ({user_id})")
+
+            # ── Notify admin about auto acceptance ──
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"✅ <b>Auto Accepted</b>\n\n"
+                        f"👤 Name: {first_name}\n"
+                        f"🔗 Username: {username}\n"
+                        f"🆔 User ID: <code>{user_id}</code>"
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin about acceptance: {e}")
+
+        except RetryAfter as e:
+            # Telegram flood limit hit — wait and retry once
+            logger.warning(f"Flood limit hit for {user_id}, retrying after {e.retry_after}s")
+            await asyncio.sleep(e.retry_after)
+            try:
+                await context.bot.approve_chat_join_request(
+                    chat_id=chat_id,
+                    user_id=int(user_id)
+                )
+                logger.info(f"Auto accepted after retry: {first_name} ({user_id})")
+
+                # ── Notify admin after retry acceptance ──
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=(
+                            f"✅ <b>Auto Accepted (after retry)</b>\n\n"
+                            f"👤 Name: {first_name}\n"
+                            f"🔗 Username: {username}\n"
+                            f"🆔 User ID: <code>{user_id}</code>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to notify admin after retry: {e}")
+
+            except Exception as e:
+                logger.info(f"Could not accept {user_id} after retry — may have cancelled: {e}")
+
         except Exception as e:
             # User may have cancelled request already — ignore silently
             logger.info(f"Could not accept {user_id} — may have cancelled: {e}")
+
     else:
         # Decline
         try:
@@ -212,6 +261,18 @@ async def _handle_auto(context, user_id, username, first_name, chat_id):
                 user_id=int(user_id)
             )
             logger.info(f"Auto declined: {first_name} ({user_id})")
+        except RetryAfter as e:
+            # Telegram flood limit hit — wait and retry once
+            logger.warning(f"Flood limit hit on decline for {user_id}, retrying after {e.retry_after}s")
+            await asyncio.sleep(e.retry_after)
+            try:
+                await context.bot.decline_chat_join_request(
+                    chat_id=chat_id,
+                    user_id=int(user_id)
+                )
+                logger.info(f"Auto declined after retry: {first_name} ({user_id})")
+            except Exception as e:
+                logger.info(f"Could not decline {user_id} after retry — may have cancelled: {e}")
         except Exception as e:
             # User may have cancelled request already — ignore silently
             logger.info(f"Could not decline {user_id} — may have cancelled: {e}")
