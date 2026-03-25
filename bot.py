@@ -317,8 +317,11 @@ def main():
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
 
     logger.info("Auto Accept Bot is running...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     application.run_polling(
-        allowed_updates=["chat_join_request", "message", "callback_query"]
+        allowed_updates=["chat_join_request", "message", "callback_query"],
+        close_loop=False
     )
 
 
