@@ -124,7 +124,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     username     = f"@{user.username}" if user.username else "(@none)"
     first_name   = user.first_name or "Unknown"
 
-    logger.info(f"Join request from {first_name} ({user_id}) — mode: {current_mode}")
+    # logger.info(f"Join request from {first_name} ({user_id}) — mode: {current_mode}")
 
     if current_mode == "manual":
         await _handle_manual(context, user_id, username, first_name, chat_id)
@@ -203,7 +203,7 @@ async def _handle_auto(context, user_id, username, first_name, chat_id):
                 chat_id=chat_id,
                 user_id=int(user_id)
             )
-            logger.info(f"Auto accepted: {first_name} ({user_id})")
+            # logger.info(f"Auto accepted: {first_name} ({user_id})")
 
             # ── Notify admin about auto acceptance ──
             try:
@@ -260,7 +260,7 @@ async def _handle_auto(context, user_id, username, first_name, chat_id):
                 chat_id=chat_id,
                 user_id=int(user_id)
             )
-            logger.info(f"Auto declined: {first_name} ({user_id})")
+            # logger.info(f"Auto declined: {first_name} ({user_id})")
         except RetryAfter as e:
             # Telegram flood limit hit — wait and retry once
             logger.warning(f"Flood limit hit on decline for {user_id}, retrying after {e.retry_after}s")
